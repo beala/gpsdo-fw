@@ -28,7 +28,7 @@ Here is the menu tree :
   - `Auto vertical scale`: press to set the auto-vertical-scale status (when set to `ON`, vertical scale will be automatically adjusted to match the displayed trend values)
   - `Auto horizontal scale`: press to set the auto-horizontal-scale status (when set to `ON`, horizontal scale will be automatically adjusted to show available data)
   - `Vertical scale`: shows the current vertical scale (value of the max PPB in the graph), if auto-vertical-scale is off, press the encoder to set the vertical scale value
-  - `Horizontal scale`: shows the current horizontal scale (number of seconds represented by a point in the trend graph), if auto-horizontal-scale is off, press the encoder to set the horizontal scale value
+  - `Horizontal scale`: shows the current horizontal scale (number of seconds represented by a point in the trend graph, up to 32), if auto-horizontal-scale is off, press the encoder to set the horizontal scale value
   - `Exit`: press to exit the Trend sub-menu
 - `PPB Menu`: displays current PPB value
   - `Mean value`: the mean PPB value (running average over 128 seconds)
@@ -48,7 +48,7 @@ Here is the menu tree :
       - For `Dankar` and `Fredzo` algorithms, the default correction factor is 10, a value bellow 10 will slow down PWM adjustment and a value above 10 will speed it up
   - `Millis`: the gap in milliseconds between GPS PPS reference and MCU calculated PPS (should be 0)
   - `PWM auto save`: press to set the PWM auto-save status (when set to `ON`, PWM value will automatically be saved the first time PPB mean value reaches 0)
-  - `PPS auto resync`: press to set the PWM auto-sync status (when set to `ON`, MCU Controlled PPS output will automatically be resynced to GPS PPS Output the first time PPB mean value reaches 0)
+  - `PPS auto resync`: press to set the PPS auto-sync status (when set to `ON`, the PPS output jumps onto the GPS PPS the first time the PPB mean value reaches 0, once the OCXO has settled)
   - `PPB Lock Threshold`: press to set the PPB threshold value above which GPSDO is considered locked
   - `Exit`: press to exit the PPB sub-menu
 - `PWM Screen`: the current PWM value, press the encoder twice to save this value to flash memory
@@ -72,14 +72,14 @@ Here is the menu tree :
 - `Uptime Screen` : displays the number of seconds elapsed since last boot
 - `GGA Frames Screen`: the number of GGA frames received from the GPS module since last boot
 - `Contrast Screen` : press the encoder to change the contrast value by turning the rotary encoder ; press again to exit (when editing contrast value, `?` is displayed after contrast)
-- `PPS Menu`: This menu is dedicated to the [MCU controlled PPS output](https://github.com/fredzo/gpsdo-fw?tab=readme-ov-file#mcu-controlled-pps-output) ; it shows the number of times the MCU PPS Output has been synced (top left) and the shift with GPS PPS output in clock cycles (bottom)
-  - `Shift`: the shift between MCU PPS output and GPS PPS output in clock cycles
-  - `Shift milliseconds`: the shift between MCU PPS output and GPS PPS output in milliseconds
-  - `Sync Count`: the number of times the MCU PPS output has been re-synced to the GPS PPS output
-  - `Sync.`: press to set the synchronization activation status (when set to `ON` the MCU PPS Output will be resynced if it deviates from the GPS PPS output of more than `threshold` clock cycles during more than `delay` seconds)
-  - `Delay`: press to set the MCU PPS output synchronisation delay (in seconds)
-  - `Threshold`: press to set the MCU PPS output synchronisation threshold (in clock cycles)
-  - `Force Sync`: press to force the MCU Controlled PPS output to be synched with the GPS PPS output
+- `PPS Menu`: This menu is dedicated to the [PPS output](#pps-output) ; it shows the number of times it has jumped onto the GPS PPS (top left) and how far it is from the GPS PPS in ns, averaged (bottom; `--` before the first lock, `free` with `Sync.` off)
+  - `Err ns`: the GPS PPS minus the PPS output edge, in ns, averaged over about a minute (`Err --` before the first lock)
+  - `Now ns`: the same for the latest second
+  - `Jmp/Mis`: the number of times the PPS output has jumped onto the GPS PPS (the first lock counts) / the number of edges missed (should stay 0)
+  - `Sync.`: press to set the synchronization status (`ON`: the PPS output is steered onto the GPS PPS ; `OFF`: it runs free at the rate it last learned)
+  - `Delay`: press to set how many seconds the PPS output must be further than `Threshold` from the GPS PPS before it jumps onto it
+  - `Thr ns`: press to set that threshold, in ns (steps of 1 µs ; default 10 µs)
+  - `Force Sync`: press to make the PPS output jump onto the GPS PPS
   - `Exit`: press to exit the PPS sub-menu
 - `Version Screen` : shows the current firmware version
 
@@ -160,22 +160,30 @@ This wrong wiring does not seem to have an impact on GPSDOs with ISOTEMP OCXO in
 
 ### Hardware Extensions
 
-#### MCU controlled PPS Output
-An MCU controlled PPS Output has been added on pin PB1. It will output a 100 ms pulse every second, based on the clock of the Bluepill board.
-This output, compared to the PPS output of the original design, is available after boot, even if the GPS module is not yet locked or if the GPS antenna is not connected.
+#### PPS Output
+A PPS output on pin **PA11** (the Bluepill's `A11`, its USB D- line: the USB port isn't used). It runs from boot,
+even before the GPS module has a fix or with no antenna, and is steered onto the GPS PPS once it's there. It's made
+for uses that need the pulse to the nanosecond (time stamping, multilateration):
 
-If `Sync` mode is on, the MCU controlled PPS output will be synchronized to the GPS PPS output as soon as the GPS module gets a fix. The deviation between the two PPS outputs will then be monitored and the MCU controlled PPS output will be resynced to the GPS PPS output as soon as it deviates from more than `threshold` clock cycles during more than `delay` seconds.
+- Each rising edge is placed by TIM1's compare at an exact count of the 70 MHz clock (the OCXO's, through the PLL):
+  no software timing in the edge.
+- TIM1 also captures the GPS module's PPS, so the two are compared on the same count, to 14 ns, every second.
+- A slow phase loop (time constant 100 s) steers the output onto the GPS PPS: the GPS module's own jitter (20-50 ns
+  on an ATGM336H) is averaged out and the OCXO carries the time in between. Once locked there are no steps: it jumps
+  onto the GPS PPS only at the first lock (after 16 s of GPS pulses), on `Force Sync`, on `PPS auto resync`, or when
+  it has been further than `Thr ns` from the GPS PPS for `Delay` seconds running.
+- Without GPS it carries on at the rate it last learned (holdover). With `Sync.` off it runs free the same way.
+- 100 ms pulse, 3.3 V, rising at the second.
+- In a simulation (`test/hwpps_sim.c`: an OCXO with an offset and a slow wander, GPS pulses with 30 ns of jitter) the
+  edges sit 5.6 ns rms from true seconds once settled. Run it with
+  `cc -O2 -Isrc -o /tmp/hwpps_sim test/hwpps_sim.c src/hwpps_core.c -lm && /tmp/hwpps_sim`.
+- The edge sits a fixed few cycles from the GPS PPS (the capture input's synchroniser, the output's path): a constant,
+  to measure once with a scope against the GPS PPS if it matters.
 
-If the `PPS auto resync` is set to `ON` in the `PPB` menu, the MCU controlled PPS Output will also be automatically resynced to the GPS PPS Output the first time PPB mean value reaches 0.
-
-The dedicated `PPS` menu allows monitoring the deviation between the MCU controlled PPS output and the GPS PPS output and setting the synchronization parameters:
-  - The `Shift` entry shows the shift between MCU PPS output and GPS PPS output in clock cycles
-  - The `Shift milliseconds` entry shows the shift between MCU PPS output and GPS PPS output in milliseconds
-  - The `Sync Count` entry shows the number of times the MCU PPS output has been re-synced to the GPS PPS output
-  - The `Sync.` entry sets the synchronization activation status (when set to `ON` the MCU PPS Output will be resynced if it deviates from the GPS PPS output of more than `threshold` clock cycles during more than `delay` seconds)
-  - The `Delay` entry sets the MCU PPS output synchronisation delay (in seconds)
-  - The `Threshold` entry sets the MCU PPS output synchronisation threshold (in clock cycles)
-  - The `Force Sync` entry can be used to force the MCU Controlled PPS output to be synched with the GPS PPS output
+To use it, wire PA11 to the PPS SMA connector (the original design's 1PPS output is the GPS module's own pulse,
+unbuffered). This replaces the earlier output on PB1, which was set by software in a timer interrupt (microseconds
+of jitter) and only lined up with the GPS PPS in TIM2's 100 µs steps; boards wired to PB1 need the wire moved to
+PA11.
 
 ![PPS Out](https://github.com/fredzo/gpsdo-fw/blob/main/doc/pps-output.jpg?raw=true)
 

@@ -3,6 +3,7 @@
 #include "frequency.h"
 #include "tim.h"
 #include "menu.h"
+#include "hwpps.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,33 +11,24 @@ volatile bool     allow_adjustment = false;
 volatile uint32_t previous_capture = 0;
 volatile uint32_t frequency        = 0;
 volatile uint32_t capture          = 0;
-volatile uint32_t pps_capture      = 0;
 volatile uint32_t num_samples      = 0;
 volatile uint32_t timer_overflows  = 0;
-volatile uint32_t pps_overflows    = 0;
 volatile uint32_t device_uptime    = 0;
 volatile uint8_t  first            = 1;
 volatile int8_t   contrast         = 0;
 volatile bool     pps_sync_on      = false;
 volatile uint32_t pps_sync_delay   = 10;
-volatile uint32_t pps_sync_threshold = 30000;
+volatile uint32_t pps_sync_threshold = 10000;   // ns (the PPS output jumps to the GPS pulse past it)
 volatile uint32_t last_pps         = 0;
-volatile uint32_t last_pps_out     = 0;
-volatile bool     pps_out_up       = false;
 volatile bool     pps_led_toogle   = false;
 volatile bool     blink_toggle     = false;
 volatile int32_t  ppb_frequency    = 0;
 volatile int32_t  ppb_error        = 0;
 volatile int32_t  ppb_correction   = 0;
 volatile int32_t  ppb_millis       = 0;
-volatile int32_t  pps_error        = 0;
-volatile int32_t  pps_millis       = 0;
-volatile uint32_t pps_shift_count  = 0;
-volatile uint32_t pps_sync_count   = 0;
 // Icon to shwow at the top right corner of the screen
 volatile uint8_t  current_state_icon = ' ';
 volatile bool     refresh_screen   = false;
-volatile bool     sync_pps_out     = false;
 volatile bool     pps_ppm_auto_sync= false;
 volatile bool     pwm_auto_save    = false;
 volatile bool     update_trend     = false;
@@ -59,15 +51,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
     if (htim == &htim1) {
         timer_overflows++;
-        pps_overflows++;
+        hwpps_overflow();
     } else if (htim == &htim2) {
-        // TIM2 is configure for 1 second count
-        // PPS output signal
-        HAL_GPIO_WritePin(PPS_OUTPUT_GPIO_Port, PPS_OUTPUT_Pin, 1);
-        pps_capture = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-        pps_overflows = 0;
-        last_pps_out = HAL_GetTick();
-        pps_out_up = true;
+        // TIM2 is configure for 1 second count (the PPS output itself is hwpps.c's, on PA11)
         // PPS LED1 blink
         HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, pps_led_toogle);
         pps_led_toogle = !pps_led_toogle;
@@ -200,28 +186,11 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim)
     if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
 
         capture = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        hwpps_gps((uint16_t)capture);   // the PPS output's phase loop (hwpps.c)
 
         uint32_t current_tick = HAL_GetTick();
         // Ignore first capture and do a sanity check on elapsed time since previous PPS
         if (!first && current_tick - last_pps < 1300) {
-            // See if we need to resync MCU PPS Out
-            pps_error = (capture - pps_capture + /*(TIM1->ARR + 1)*/ 65536 * pps_overflows) - 70000000 /*HAL_RCC_GetHCLKFreq()*/;
-            if(pps_sync_on && (sync_pps_out ||(abs(pps_error) >= pps_sync_threshold)))
-            {
-                pps_shift_count++;
-                if(sync_pps_out || (pps_shift_count > pps_sync_delay))
-                {   // Force sync by reseting TIM2
-                    TIM2->CNT = TIM2->ARR;
-                    pps_sync_count++;
-                    pps_shift_count = 0;
-                    sync_pps_out = false;
-                }
-            }
-            else
-            {   // Reset shift count if we are below threshold
-                pps_shift_count = 0;
-            }
-
             // Frequency detection for VCO adjustment
             frequency = capture - previous_capture + /*(TIM1->ARR + 1)*/ 65536 * timer_overflows;
 
@@ -253,7 +222,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim)
             ppb_frequency = frequency;
             ppb_error = current_error;
             ppb_millis = current_tick - last_pps - 1000;
-            pps_millis = (pps_error/7); // Clock is 70 MHz and we want the value in 10s of microseconds so 10 0000 000 / 70 000 000 = 1/7
 
             if (allow_adjustment) 
             {   // Also remove warmup samples from circular buffer
@@ -356,3 +324,11 @@ uint32_t get_default_warmup_time(ocxo_model_type model)
 }
 
 
+
+// TIM1 channel 4 compare: the hardware PPS output (hwpps.c)
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim)
+{
+    if (htim == &htim1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_4) {
+        hwpps_cc4();
+    }
+}

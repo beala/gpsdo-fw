@@ -6,6 +6,7 @@
 #include "menu.h"
 #include "int.h"
 #include "tim.h"
+#include "hwpps.h"
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,7 +14,6 @@
 #include <string.h>
 
 /// All times in ms
-#define PPS_PULSE_WIDTH         100
 #define GPS_FRAME_WAIT_DELAY    10000
 
 void gpsdo(void)
@@ -60,8 +60,9 @@ void gpsdo(void)
         ee_storage.pps_sync_delay = 10;
     }
     pps_sync_delay = ee_storage.pps_sync_delay;
-    if (ee_storage.pps_sync_threshold == 0xffffffff) {
-        ee_storage.pps_sync_threshold = 30000;
+    // the threshold is in ns now (it was cycles of the old PB1 output: 30000 was its default)
+    if (ee_storage.pps_sync_threshold == 0xffffffff || ee_storage.pps_sync_threshold == 30000) {
+        ee_storage.pps_sync_threshold = 10000;
     }
     pps_sync_threshold = ee_storage.pps_sync_threshold;
     if (ee_storage.pps_ppm_auto_sync == 0xff) {
@@ -87,6 +88,9 @@ void gpsdo(void)
     trend_v_scale = ee_storage.trend_v_scale;
     if (ee_storage.trend_h_scale == 0xffffffff) {
         ee_storage.trend_h_scale = 1;
+    }
+    if (ee_storage.trend_h_scale > 32) {   // the trend history now goes to 32 s a point (menu.c TREND_MAX_H_SCALE)
+        ee_storage.trend_h_scale = 32;
     }
     trend_h_scale = ee_storage.trend_h_scale;
     // Boot menu
@@ -148,6 +152,7 @@ void gpsdo(void)
 
     HAL_Delay(100);
     frequency_start();
+    hwpps_start();
 
     HAL_TIM_Base_Start(&htim3);
     HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
@@ -156,11 +161,6 @@ void gpsdo(void)
 
     while (1) {
         uint32_t now = HAL_GetTick();
-        if(pps_out_up && now-last_pps_out >= PPS_PULSE_WIDTH)
-        {
-            HAL_GPIO_WritePin(PPS_OUTPUT_GPIO_Port, PPS_OUTPUT_Pin, 0);
-            pps_out_up = false;
-        }
         if (!vco_adjust_allowed && (now >= (warmup_time_seconds*1000)))
         {   // Start adjusting the VCO after some time
             frequency_allow_adjustment(true);

@@ -76,8 +76,6 @@ void Error_Handler(void);
 #define LED1_GPIO_Port GPIOC
 #define PPS_Pin GPIO_PIN_8
 #define PPS_GPIO_Port GPIOA
-#define PPS_OUTPUT_Pin GPIO_PIN_1
-#define PPS_OUTPUT_GPIO_Port GPIOB
 #define GPS_LOCK_OUTPUT_Pin GPIO_PIN_0
 #define GPS_LOCK_OUTPUT_GPIO_Port GPIOA
 #define PPB_LOCK_OUTPUT_Pin GPIO_PIN_1

@@ -12,6 +12,7 @@
 #include "stm32f1xx_hal_gpio.h"
 #include "int.h"
 #include "menu.h"
+#include "hwpps.h"
 
 /// All times in ms
 #define DEBOUNCE_TIME           50
@@ -95,11 +96,12 @@ static uint32_t     last_menu_change    = 0;
 static bool         auto_save_pwm_done  = false;
 static bool         auto_sync_pps_done  = false;
 
-#define TREND_MAX_SIZE      7208 // 112 * 64 (TREND_MAX_H_SCALE) + 40 (TREND_SCREEN_SIZE)
+// 32 seconds a point at most (was 64): the history was 14.4 KB of the chip's 20 KB of RAM; halved, RAM has room
+#define TREND_MAX_SIZE      3624 // 112 * 32 (TREND_MAX_H_SCALE) + 40 (TREND_SCREEN_SIZE)
 #define TREND_SCREEN_SIZE   40
 #define TREND_UNSET_VALUE   0xFFFF
-#define TREND_MAX_H_SCALE   64
-#define TREND_MAX_SHIFT     7168 // 7208 (TREND_MAX_SIZE) - 40 (TREND_SCREEN_SIZE)
+#define TREND_MAX_H_SCALE   32
+#define TREND_MAX_SHIFT     3584 // 3624 (TREND_MAX_SIZE) - 40 (TREND_SCREEN_SIZE)
 static uint16_t     ppb_trend_values[TREND_MAX_SIZE];
 static uint32_t     ppb_trend_position = 0;
 static uint32_t     ppb_trend_size = 0;
@@ -800,9 +802,13 @@ static void menu_draw()
         LCD_Puts(0, 1, "        ");
         if(menu_level == 0)
         {
-            snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "PPS:%3ld", pps_sync_count);
+            // the PPS output (hwpps.c): jumps to the GPS pulse, and how far it is from it (ns, averaged)
+            snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "PPS:%3lu", (unsigned long)hwpps_jumps());
             LCD_Puts(1, 0, screen_buffer);
-            snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", pps_error);
+            if (hwpps_locked())
+                snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ldns", (long)hwpps_err_ns());
+            else
+                snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%s", pps_sync_on ? "  --" : " free");
             LCD_Puts(0, 1, screen_buffer);
         }
         else
@@ -811,19 +817,21 @@ static void menu_draw()
             {
                 default:
                 case SCREEN_PPS_SHIFT:
-                    LCD_Puts(1, 0, "Shift:");
-                    // Check we have enough space for minus sign
-                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", (pps_error < -9999999) ? abs(pps_error) : pps_error);
+                    // GPS pulse minus output edge, averaged over about a minute
+                    LCD_Puts(1, 0, hwpps_locked() ? "Err ns:" : "Err --:");
+                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", (long)hwpps_err_ns());
                     LCD_Puts(0, 1, screen_buffer);
                     break;
                 case SCREEN_PPS_SHIFT_MS:
-                    LCD_Puts(1, 0, "Sft ms:");
-                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld.%04d", pps_millis / 10000, abs(pps_millis) % 10000);
+                    // the same, the latest second
+                    LCD_Puts(1, 0, "Now ns:");
+                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", (long)hwpps_err_now_ns());
                     LCD_Puts(0, 1, screen_buffer);
                     break;
                 case SCREEN_PPS_SYNC_COUNT:
-                    LCD_Puts(1, 0, "SynCnt:");
-                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", pps_sync_count);
+                    // jumps to the GPS pulse (the first lock counts) / edges missed (should stay 0)
+                    LCD_Puts(1, 0, "Jmp/Mis");
+                    snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%lu/%lu", (unsigned long)hwpps_jumps(), (unsigned long)hwpps_late());
                     LCD_Puts(0, 1, screen_buffer);
                     break;
                 case SCREEN_PPS_SYNC_MODE:
@@ -836,7 +844,7 @@ static void menu_draw()
                     LCD_Puts(0, 1, screen_buffer);
                     break;
                 case SCREEN_PPS_SYNC_THRESHOLD:
-                    LCD_Puts(1, 0, menu_level == 1 ? "Thrsld:":"Thrsld?");
+                    LCD_Puts(1, 0, menu_level == 1 ? "Thr ns:":"Thr ns?");
                     snprintf(screen_buffer, SCREEN_BUFFER_SIZE, "%ld", pps_sync_threshold);
                     LCD_Puts(0, 1, screen_buffer);
                     break;
@@ -850,7 +858,7 @@ static void menu_draw()
                     {
                         LCD_Puts(1, 0,  " Forced");
                         LCD_Puts(0, 1, "  sync !");
-                        sync_pps_out = true;
+                        hwpps_force();
                         menu_level = 1;
                     }
                     break;
@@ -1189,7 +1197,9 @@ void menu_run()
                     break;
                 case SCREEN_PPS_SYNC_THRESHOLD:
                     // Update threshold
-                    pps_sync_threshold += encoder_increment;
+                    // ns, in steps of 1 us (at least 1 us: the GPS pulse's jitter is tens of ns)
+                    pps_sync_threshold = ((int32_t)pps_sync_threshold + encoder_increment * 1000 < 1000) ? 1000 :
+                                         pps_sync_threshold + encoder_increment * 1000;
                     LCD_Clear();
                     menu_force_redraw();
                     break;
@@ -1574,7 +1584,7 @@ void menu_run()
             }
             if(pps_ppm_auto_sync && !auto_sync_pps_done)
             {
-                sync_pps_out = true;
+                hwpps_force();   // the OCXO has settled: put the PPS output on the GPS pulse
                 // Only auto-sync once per session
                 auto_sync_pps_done = true;
                 did_pps = true;

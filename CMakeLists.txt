@@ -40,6 +40,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     src/gps.c
     src/int.c
     src/menu.c
+    src/hwpps.c
+    src/hwpps_core.c
 )
 
 
